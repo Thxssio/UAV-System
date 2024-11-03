@@ -1,0 +1,10 @@
+# Objetivo (Goal)
+bool arm  # true para armar, false para desarmar
+
+---
+# Resultado (Result)
+bool success  # true se o comando foi executado com sucesso
+
+---
+# Feedback (Feedback)
+string message  # feedback sobre o status atual do armamento/desarmamento

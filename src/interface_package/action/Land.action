@@ -1,0 +1,10 @@
+# Goal
+# (Nenhum objetivo específico para pouso)
+
+---
+# Result
+bool success
+
+---
+# Feedback
+float32 current_altitude
