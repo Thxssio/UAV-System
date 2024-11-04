@@ -7,17 +7,27 @@ import rospy
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, SetMode
-
-from interface_package.msg import (ArmDesarmAction, ArmDesarmFeedback,
-                                   ArmDesarmResult, LandAction, LandFeedback,
-                                   LandResult, SetModeAction, SetModeFeedback,
-                                   SetModeResult, TakeoffAction,
-                                   TakeoffFeedback, TakeoffResult)
+from interface_package.srv import MoveCommand, MoveCommandResponse
+from interface_package.msg import (
+    ArmDesarmAction,
+    ArmDesarmFeedback,
+    ArmDesarmResult,
+    LandAction,
+    LandFeedback,
+    LandResult,
+    SetModeAction,
+    SetModeFeedback,
+    SetModeResult,
+    TakeoffAction,
+    TakeoffFeedback,
+    TakeoffResult,
+)
 
 
 class InterfaceManager:
     def __init__(self):
         rospy.init_node("interface_manager")
+        self.move_command_active = False
 
         # Inicializa os servidores de ação
         self.arm_server = actionlib.SimpleActionServer(
@@ -47,8 +57,14 @@ class InterfaceManager:
 
         # Subscritor para a altitude atual do drone
         self.current_altitude = 0.0
+        self.altitude_lock = threading.Lock()
         rospy.Subscriber(
             "/mavros/local_position/pose", PoseStamped, self.altitude_callback
+        )
+
+        # Serviço MoveCommand
+        self.move_command_service = rospy.Service(
+            "/move_command", MoveCommand, self.handle_move_command
         )
 
         # Serviços MAVROS
@@ -62,17 +78,23 @@ class InterfaceManager:
         self.target_pose.pose.position.x = 0.0
         self.target_pose.pose.position.y = 0.0
         self.target_pose.pose.position.z = 0.0
+        self.pose_lock = threading.Lock()  
 
-        # Variável de controle para monitorar o último tempo de publicação do cliente
+
         self.last_client_pub_time = time.time()
 
-        # Inicia a publicação contínua em uma thread separada
-        self.position_thread = threading.Thread(target=self.publish_position)
-        self.position_thread.start()
+        # Timer para gerenciar o move_command
+        self.move_timer = None
 
-        # Tenta manter o drone no modo OFFBOARD
-        self.offboard_thread = threading.Thread(target=self.ensure_offboard_mode)
-        self.offboard_thread.start()
+        # Inicia a publicação contínua usando rospy.Timer
+        self.position_timer = rospy.Timer(
+            rospy.Duration(1.0 / 120), self.publish_position
+        )
+
+        # Tenta manter o drone no modo OFFBOARD usando rospy.Timer
+        self.offboard_timer = rospy.Timer(
+            rospy.Duration(1.0 / 120), self.ensure_offboard_mode
+        )
 
         # Define um subscritor para detectar quando o cliente envia posições
         rospy.Subscriber(
@@ -87,62 +109,55 @@ class InterfaceManager:
 
     def altitude_callback(self, msg):
         """Callback para atualizar a altitude atual do drone."""
-        self.current_altitude = msg.pose.position.z
+        with self.altitude_lock:
+            self.current_altitude = msg.pose.position.z
 
     def client_position_callback(self, msg):
         """Callback para monitorar a última vez que o cliente publicou uma posição."""
         self.last_client_pub_time = time.time()
 
-    def publish_position(self):
-        """Função que publica continuamente a posição alvo para manter o modo OFFBOARD."""
-        rate = rospy.Rate(120)
+    def handle_move_command(self, req):
+        """Manipulador para o serviço MoveCommand, ajusta a posição alvo do drone."""
         rospy.loginfo(
-            "Iniciando publicação contínua de posição para manter o modo OFFBOARD..."
+            f"Recebendo comando de movimento: x={req.x}, y={req.y}, z={req.z}, yaw={req.yaw}"
         )
+        self.move_command_active = True
+        self.last_client_pub_time = time.time()  # Atualiza o tempo da última publicação
 
-        while not rospy.is_shutdown():
-            # Se o cliente não publicar por mais de 2 segundos e o drone estiver voando, inicia pouso seguro
-            if (
-                time.time() - self.last_client_pub_time > 2.0
-                and self.current_state.armed
-            ):
-                rospy.logwarn("Cliente inativo. Iniciando pouso seguro.")
-                self.execute_land(None)
-                break
+        with self.pose_lock:
+            self.target_pose.pose.position.x = req.x
+            self.target_pose.pose.position.y = req.y
+            self.target_pose.pose.position.z = req.z
 
-            # Publica a posição alvo continuamente
-            self.position_pub.publish(self.target_pose)
-            rate.sleep()
+        return MoveCommandResponse(success=True)
 
-    def ensure_offboard_mode(self):
-        """Função para garantir que o drone esteja no modo OFFBOARD."""
-        rate = rospy.Rate(120)
-        while not rospy.is_shutdown():
+    def deactivate_move_command(self, event):
+        """Desativa a flag move_command_active após um período de inatividade do move_command."""
+        self.move_command_active = False
+
+    def publish_position(self, event):
+        """Publica continuamente a posição alvo para manter o modo OFFBOARD."""
+        try:
+            with self.pose_lock:
+                target_pose = self.target_pose
+            self.position_pub.publish(target_pose)
+        except Exception as e:
+            rospy.logerr(f"Erro ao publicar posição: {e}")
+
+    def ensure_offboard_mode(self, event):
+        """Garante que o drone esteja no modo OFFBOARD."""
+        try:
             if self.current_state.mode != "OFFBOARD":
                 rospy.loginfo("Tentando alternar para o modo OFFBOARD...")
-                try:
-                    response = self.set_mode_service(custom_mode="OFFBOARD")
-                    if response.mode_sent:
-                        rospy.loginfo(
-                            "Solicitação para modo OFFBOARD enviada com sucesso. Aguardando confirmação..."
-                        )
-                        timeout = rospy.Time.now() + rospy.Duration(5)
-                        while rospy.Time.now() < timeout:
-                            if self.current_state.mode == "OFFBOARD":
-                                rospy.loginfo(
-                                    "Modo OFFBOARD confirmado pelo estado do drone."
-                                )
-                                break
-                            rospy.sleep(0.1)
-                        else:
-                            rospy.logwarn(
-                                "Não foi possível confirmar o modo OFFBOARD pelo estado do drone."
-                            )
-                    else:
-                        rospy.logwarn("Falha ao enviar solicitação para modo OFFBOARD.")
-                except rospy.ServiceException as e:
-                    rospy.logerr(f"Erro ao tentar mudar para o modo OFFBOARD: {e}")
-            rate.sleep()
+                response = self.set_mode_service(custom_mode="OFFBOARD")
+                if response.mode_sent:
+                    rospy.loginfo("Solicitação para modo OFFBOARD enviada com sucesso.")
+                else:
+                    rospy.logwarn("Falha ao enviar solicitação para modo OFFBOARD.")
+        except rospy.ServiceException as e:
+            rospy.logerr(f"Erro ao tentar mudar para o modo OFFBOARD: {e}")
+        except Exception as e:
+            rospy.logerr(f"Erro na função ensure_offboard_mode: {e}")
 
     def execute_arm(self, goal):
         feedback = ArmDesarmFeedback()
@@ -154,13 +169,14 @@ class InterfaceManager:
             feedback.message = "Drone armado" if goal.arm else "Drone desarmado"
             self.arm_server.publish_feedback(feedback)
             rospy.loginfo(feedback.message)
-            self.arm_server.set_succeeded(result)
-
+            if response.success:
+                self.arm_server.set_succeeded(result)
+            else:
+                self.arm_server.set_aborted(result)
         except rospy.ServiceException as e:
-            feedback.message = (
-                f"Erro ao chamar o serviço de armamento/desarmamento: {e}"
-            )
+            feedback.message = f"Erro ao chamar o serviço de armamento/desarmamento: {e}"
             rospy.logerr(feedback.message)
+            result.success = False
             self.arm_server.set_aborted(result)
 
     def execute_mode(self, goal):
@@ -178,9 +194,10 @@ class InterfaceManager:
             )
             self.mode_server.publish_feedback(feedback)
             rospy.loginfo(feedback.message)
-            self.mode_server.set_succeeded(
-                result if response.mode_sent else self.mode_server.set_aborted(result)
-            )
+            if response.mode_sent:
+                self.mode_server.set_succeeded(result)
+            else:
+                self.mode_server.set_aborted(result)
         except rospy.ServiceException as e:
             feedback.message = f"Erro ao chamar o serviço de modo: {e}"
             rospy.logerr(feedback.message)
@@ -191,7 +208,9 @@ class InterfaceManager:
         feedback = TakeoffFeedback()
         result = TakeoffResult()
         target_altitude = goal.altitude
-        self.target_pose.pose.position.z = target_altitude
+
+        with self.pose_lock:
+            self.target_pose.pose.position.z = target_altitude
 
         rospy.loginfo(f"Iniciando decolagem para altitude: {target_altitude} metros")
         rate = rospy.Rate(120)
@@ -203,13 +222,17 @@ class InterfaceManager:
                 self.takeoff_server.set_preempted(result)
                 return
 
-            self.position_pub.publish(self.target_pose)
+            with self.pose_lock:
+                self.position_pub.publish(self.target_pose)
 
-            feedback.current_altitude = self.current_altitude
+            with self.altitude_lock:
+                current_altitude = self.current_altitude
+
+            feedback.current_altitude = current_altitude
             self.takeoff_server.publish_feedback(feedback)
             rospy.loginfo(f"Altitude atual: {feedback.current_altitude:.2f} metros")
 
-            if self.current_altitude >= target_altitude - 0.2:
+            if current_altitude >= target_altitude - 0.1:
                 rospy.loginfo("Altitude de decolagem alcançada.")
                 result.success = True
                 self.takeoff_server.set_succeeded(result)
@@ -217,29 +240,35 @@ class InterfaceManager:
 
             rate.sleep()
 
-    def execute_land(self, goal=None):
+    def execute_land(self, goal):
         feedback = LandFeedback()
         result = LandResult()
 
         rospy.loginfo("Iniciando o pouso do drone...")
-        rate = rospy.Rate(10)
+        rate = rospy.Rate(120)
 
         while not rospy.is_shutdown():
-            if self.target_pose.pose.position.z > 0.1:
-                self.target_pose.pose.position.z -= 0.1
-                self.position_pub.publish(self.target_pose)
-                feedback.current_altitude = self.target_pose.pose.position.z
-                if goal:
-                    self.land_server.publish_feedback(feedback)
-                rospy.loginfo(
-                    f"Altitude atual durante pouso: {feedback.current_altitude:.2f} metros"
-                )
-            else:
-                rospy.loginfo("Altitude mínima alcançada. Concluindo pouso.")
-                result.success = True
-                if goal:
+            if self.land_server.is_preempt_requested():
+                rospy.loginfo("Pouso preemptado pelo cliente.")
+                result.success = False
+                self.land_server.set_preempted(result)
+                return
+
+            with self.pose_lock:
+                if self.target_pose.pose.position.z > 0.1:
+                    self.target_pose.pose.position.z -= 0.1
+                    self.position_pub.publish(self.target_pose)
+                    feedback.current_altitude = self.target_pose.pose.position.z
+                else:
+                    rospy.loginfo("Altitude mínima alcançada. Concluindo pouso.")
+                    result.success = True
                     self.land_server.set_succeeded(result)
-                break
+                    break
+
+            self.land_server.publish_feedback(feedback)
+            rospy.loginfo(
+                f"Altitude atual durante pouso: {feedback.current_altitude:.2f} metros"
+            )
 
             rate.sleep()
 
