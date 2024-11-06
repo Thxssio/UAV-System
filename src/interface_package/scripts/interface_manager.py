@@ -3,6 +3,7 @@ import actionlib
 import rospy
 import threading
 
+
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, SetMode
@@ -199,6 +200,12 @@ class InterfaceManager:
                 return
             rospy.loginfo("Drone armado com sucesso.")
 
+            # Zera os valores de posição ao armar o drone
+            self.target_pose.pose.position.x = 0.0
+            self.target_pose.pose.position.y = 0.0
+            self.target_pose.pose.position.z = 0.0
+            rospy.loginfo("Posição alvo resetada após armar o drone.")
+
             # Espera até que o drone esteja efetivamente armado no estado atual
             rate = rospy.Rate(10)  # Frequência de verificação de 10 Hz
             for _ in range(10):  # Verifica por até 1 segundo
@@ -274,7 +281,7 @@ class InterfaceManager:
             self.land_server.set_aborted(result)
             return
 
-        rate = rospy.Rate(120)  # Define uma frequência de verificação de 10 Hz durante o pouso
+        rate = rospy.Rate(120)  # Define uma frequência de verificação de 120 Hz durante o pouso
         while not rospy.is_shutdown():
             feedback.current_altitude = self.current_altitude
             self.land_server.publish_feedback(feedback)
@@ -291,6 +298,13 @@ class InterfaceManager:
 
                     # Muda para o modo AUTO.LOITER após o pouso e desarmamento
                     self.set_initial_auto_loiter_mode()
+
+                    # Ajusta a posição atual como a nova origem
+                    self.target_pose.pose.position.x = 0.0
+                    self.target_pose.pose.position.y = 0.0
+                    self.target_pose.pose.position.z = 0.0
+                    rospy.loginfo("Posição alvo resetada após pouso.")
+                    self.update_origin()
                     break
 
             # Verifica se a ação foi preemptada (interrompida pelo cliente)
@@ -301,6 +315,17 @@ class InterfaceManager:
                 return
 
             rate.sleep()
+
+    def update_origin(self):
+        """Atualiza a origem da posição para as coordenadas atuais."""
+        current_position = self.get_current_position()
+        self.origin_x = current_position.x
+        self.origin_y = current_position.y
+        rospy.loginfo(f"Nova origem definida em ({self.origin_x}, {self.origin_y}).")
+
+    def get_current_position(self):
+        """Retorna a posição atual do drone."""
+        return self.target_pose.pose.position
 
     def shutdown(self):
         self.keep_publishing = False
