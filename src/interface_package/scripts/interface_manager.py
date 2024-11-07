@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import actionlib
 import rospy
+import actionlib
 import threading
-
-
-from geometry_msgs.msg import PoseStamped
+import tf2_ros
+import tf2_geometry_msgs
+import numpy as np
+from geometry_msgs.msg import PoseStamped, Point, Quaternion
+from nav_msgs.msg import Odometry
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, SetMode
 from interface_package.msg import (
@@ -22,7 +24,7 @@ from interface_package.msg import (
     LandResult,
 )
 from interface_package.srv import MoveCommand, MoveCommandResponse
-
+from tf.transformations import quaternion_from_euler, quaternion_multiply
 
 class InterfaceManager:
     def __init__(self):
@@ -59,6 +61,19 @@ class InterfaceManager:
         rospy.Subscriber("/mavros/state", State, self.state_callback)
         rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.altitude_callback)
 
+        # Buffer e Listener para TF2
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        # Subscriber para a odometria da câmera ZED Mini
+        rospy.Subscriber('/zedm/zed_node/odom', Odometry, self.camera_odom_callback)
+
+        # Publisher para a odometria transformada
+        self.transformed_odom_pub = rospy.Publisher('/mavros/odometry/out', Odometry, queue_size=10)
+
+        # Publicar a transformação estática entre a câmera e a controladora
+        self.publish_static_transform()
+
         # Serviço MoveCommand
         self.move_command_service = rospy.Service(
             "/move_command", MoveCommand, self.handle_move_command
@@ -84,6 +99,80 @@ class InterfaceManager:
         self.publisher_thread = threading.Thread(target=self.publish_position)
         self.publisher_thread.start()
 
+    def publish_static_transform(self):
+        broadcaster = tf2_ros.StaticTransformBroadcaster()
+        static_transformStamped = geometry_msgs.msg.TransformStamped()
+
+        static_transformStamped.header.stamp = rospy.Time.now()
+        static_transformStamped.header.frame_id = "base_link"  # Frame da controladora
+        static_transformStamped.child_frame_id = "zedm_left_camera_frame"  # Frame da câmera ZED Mini
+
+        static_transformStamped.transform.translation.x = 0.1  # 10 cm à frente
+        static_transformStamped.transform.translation.y = 0.0
+        static_transformStamped.transform.translation.z = -0.1  # 10 cm abaixo
+
+        quat = quaternion_from_euler(0, 0, 0)
+        static_transformStamped.transform.rotation.x = quat[0]
+        static_transformStamped.transform.rotation.y = quat[1]
+        static_transformStamped.transform.rotation.z = quat[2]
+        static_transformStamped.transform.rotation.w = quat[3]
+
+        broadcaster.sendTransform(static_transformStamped)
+
+    def camera_odom_callback(self, msg):
+        try:
+            # Obter a transformação da câmera para a controladora
+            transform = self.tf_buffer.lookup_transform(
+                'base_link', 'zedm_left_camera_frame', rospy.Time(0), rospy.Duration(1.0)
+            )
+
+            # Transformar a pose da odometria da câmera para o frame da controladora
+            pose = PoseStamped()
+            pose.header = msg.header
+            pose.pose = msg.pose.pose
+
+            pose_transformed = tf2_geometry_msgs.do_transform_pose(pose, transform)
+
+            # Converter de ENU para NED
+            ned_position, ned_orientation = self.enu_to_ned(
+                pose_transformed.pose.position, pose_transformed.pose.orientation
+            )
+
+            # Criar nova mensagem de odometria
+            odom_ned = Odometry()
+            odom_ned.header.stamp = rospy.Time.now()
+            odom_ned.header.frame_id = 'base_link'
+            odom_ned.child_frame_id = 'base_link'
+
+            odom_ned.pose.pose.position = ned_position
+            odom_ned.pose.pose.orientation = ned_orientation
+
+            # Publicar a odometria transformada
+            self.transformed_odom_pub.publish(odom_ned)
+
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException, tf2_ros.ConnectivityException) as e:
+            rospy.logwarn('Transformação não disponível: %s', e)
+
+    def enu_to_ned(self, position, orientation):
+        # Converter posição
+        ned_position = Point()
+        ned_position.x = position.y
+        ned_position.y = position.x
+        ned_position.z = -position.z
+
+        # Converter orientação
+        q_enu = [orientation.x, orientation.y, orientation.z, orientation.w]
+        # Rotacionar 180 graus em torno do eixo X para passar de ENU para NED
+        q_rot = quaternion_from_euler(np.pi, 0, 0)
+        q_ned = quaternion_multiply(q_rot, q_enu)
+
+        ned_orientation = Quaternion()
+        ned_orientation.x = q_ned[0]
+        ned_orientation.y = q_ned[1]
+        ned_orientation.z = q_ned[2]
+        ned_orientation.w = q_ned[3]
+
+        return ned_position, ned_orientation
 
     def state_callback(self, msg):
         """Callback para atualizar o estado atual do drone."""
@@ -107,7 +196,7 @@ class InterfaceManager:
     def publish_position(self):
         rate = rospy.Rate(120)  # Publicação a cada 0,1s
         while not rospy.is_shutdown() and self.keep_publishing:
-            # Publica a posição atual do target_pose, que será zero se nenhum comando for recebido
+            # Publica a posição atual do target_pose
             self.position_pub.publish(self.target_pose)
             rate.sleep()
 
@@ -125,12 +214,12 @@ class InterfaceManager:
                         rospy.loginfo("Tentativa de ativar o modo OFFBOARD.")
 
                         rate = rospy.Rate(10)  # Frequência de verificação de 10 Hz
-                        for _ in range(10):  # Verifica por até 1 segundo (10 tentativas a 10 Hz)
+                        for _ in range(10):  # Verifica por até 1 segundo
                             if self.current_state.mode == "OFFBOARD":
                                 rospy.loginfo("Modo OFFBOARD ativado com sucesso.")
                                 return True
                             rate.sleep()
-                    
+
                     rospy.logwarn("Tentativa de ativar o modo OFFBOARD falhou. Retentando...")
                     rospy.sleep(0.5)  # Pausa entre as tentativas
 
@@ -140,7 +229,6 @@ class InterfaceManager:
                 rospy.logerr(f"Erro ao tentar mudar para o modo OFFBOARD: {e}")
                 return False
         return True
-
 
     def execute_arm(self, goal):
         feedback = ArmDesarmFeedback()
@@ -260,7 +348,7 @@ class InterfaceManager:
                 return
 
             rate.sleep()
-            
+
     def execute_land(self, goal):
         feedback = LandFeedback()
         result = LandResult()
@@ -281,7 +369,7 @@ class InterfaceManager:
             self.land_server.set_aborted(result)
             return
 
-        rate = rospy.Rate(120)  # Define uma frequência de verificação de 120 Hz durante o pouso
+        rate = rospy.Rate(120)  # Frequência de verificação de 120 Hz durante o pouso
         while not rospy.is_shutdown():
             feedback.current_altitude = self.current_altitude
             self.land_server.publish_feedback(feedback)
@@ -307,7 +395,7 @@ class InterfaceManager:
                     self.update_origin()
                     break
 
-            # Verifica se a ação foi preemptada (interrompida pelo cliente)
+            # Verifica se a ação foi preemptada
             if self.land_server.is_preempt_requested():
                 rospy.loginfo("Pouso preemptado pelo cliente.")
                 result.success = False
@@ -331,19 +419,23 @@ class InterfaceManager:
         self.keep_publishing = False
         self.publisher_thread.join()
 
-
     def handle_move_command(self, req):
-            rospy.loginfo(f"Recebendo comando de movimento: x={req.x}, y={req.y}, z={req.z}, yaw={req.yaw}")
-            self.received_move_command = True  # Comando recebido
+        rospy.loginfo(f"Recebendo comando de movimento: x={req.x}, y={req.y}, z={req.z}, yaw={req.yaw}")
+        self.received_move_command = True  # Comando recebido
 
-            # Atualiza o target_pose com os valores recebidos
-            self.target_pose.pose.position.x = req.x
-            self.target_pose.pose.position.y = req.y
-            self.target_pose.pose.position.z = req.z
-            self.target_pose.pose.orientation.z = req.yaw  # Supondo que o yaw seja representado assim
+        # Atualiza o target_pose com os valores recebidos
+        self.target_pose.pose.position.x = req.x
+        self.target_pose.pose.position.y = req.y
+        self.target_pose.pose.position.z = req.z
 
-            return MoveCommandResponse(success=True)
+        # Atualiza a orientação (yaw)
+        quat = quaternion_from_euler(0, 0, req.yaw)
+        self.target_pose.pose.orientation.x = quat[0]
+        self.target_pose.pose.orientation.y = quat[1]
+        self.target_pose.pose.orientation.z = quat[2]
+        self.target_pose.pose.orientation.w = quat[3]
 
+        return MoveCommandResponse(success=True)
 
 if __name__ == "__main__":
     manager = InterfaceManager()

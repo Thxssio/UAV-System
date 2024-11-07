@@ -110,7 +110,7 @@ generate_messages(
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
- CATKIN_DEPENDS actionlib actionlib_msgs rospy std_msgs geometry_msgs mavros mavros_msgs message_runtime
+ CATKIN_DEPENDS actionlib actionlib_msgs rospy std_msgs geometry_msgs mavros mavros_msgs message_runtime tf tf2_ros tf2_geometry_msgs
 )
 
 ###########
