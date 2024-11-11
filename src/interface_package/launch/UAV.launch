@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+  <!-- Remapeia os tópicos do ZED para os tópicos MAVROS de visão -->
+  <remap from="/zedm/zed_node/pose" to="/mavros/vision_pose/pose" /> 
+  <remap from="/zedm/zed_node/pose_with_covariance" to="/mavros/vision_pose/pose_cov" />
+
+  <!-- Inclui o arquivo de lançamento do ZED -->
+  <include file="$(find zed_wrapper)/launch/zedm.launch" />
+
+  <!-- Inicia o MAVROS com PX4 via USB -->
+  <include file="$(find mavros)/launch/px4.launch">
+    <arg name="fcu_url" value="serial:///dev/ttyUSB0:57600" />
+  </include>
+
+  <!-- Inicia o interface_package -->
+  <include file="$(find interface_package)/launch/interface.launch" />
+
+  <!-- Inicia o mission_package -->
+  <include file="$(find interface_package)/launch/mission.launch" />
+</launch>
