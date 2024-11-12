@@ -13,7 +13,7 @@ class Mission(ABC):
         self.current_position = None  # Armazena a posição atual do drone
 
         # Inscrição no tópico de posição
-        rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.position_callback)
+        rospy.Subscriber("/uav1/mavros/local_position/pose", PoseStamped, self.position_callback)
 
     def position_callback(self, msg):
         """Callback para atualizar a posição atual do drone."""

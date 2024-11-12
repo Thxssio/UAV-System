@@ -1,0 +1,3 @@
+<launch>
+  <node name="mission_node" pkg="mission_package" type="mission_node.py" output="screen" />
+</launch>

@@ -1,0 +1,4 @@
+<launch>
+  <!-- Lança o script interface_manager.py no interface_package -->
+  <node name="interface_manager" pkg="interface_package" type="interface_manager.py" output="screen" />
+</launch>
