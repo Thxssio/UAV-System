@@ -56,8 +56,16 @@ class InterfaceManager:
         self.position_pub = rospy.Publisher(
             "/mavros/setpoint_position/local", PoseStamped, queue_size=10
         )
+
+        self.vision_pose_pub = rospy.Publisher(
+            "/mavros/vision_pose/pose", PoseStamped, queue_size=10
+        )
+
         rospy.Subscriber("/mavros/state", State, self.state_callback)
-        rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.altitude_callback)
+        rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.altitude_callback)    
+        rospy.Subscriber("/vision_pose", PoseStamped, self.vision_pose_callback)
+        rospy.Subscriber("/vision_pose/pose_conv", PoseStamped, self.vision_pose_callback)
+
 
         # Serviço MoveCommand
         self.move_command_service = rospy.Service(
@@ -92,6 +100,11 @@ class InterfaceManager:
     def altitude_callback(self, msg):
         """Atualiza a altitude atual do drone."""
         self.current_altitude = msg.pose.position.z
+        
+    def vision_pose_callback(self, msg):
+        """Callback que redireciona vision_pose e vision_pose/pose_conv para /mavros/vision_pose/pose."""
+        rospy.loginfo(f"Redirecionando pose de visão para /mavros/vision_pose/pose: posição=({msg.pose.position.x}, {msg.pose.position.y}, {msg.pose.position.z})")
+        self.vision_pose_pub.publish(msg)
 
     def set_initial_auto_loiter_mode(self):
         """Define o modo inicial como AUTO.LOITER uma vez ao iniciar o nó."""
